@@ -22,7 +22,7 @@ on:
           -stagging
           -pod
 env:
-  GCP_REGION: euroupe-west1
+  GCP_REGION: europe-west1
   ARTIFACT_REGISTRY: demo
 jobs:
   deploy:
