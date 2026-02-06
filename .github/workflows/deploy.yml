@@ -1,15 +1,9 @@
 name: Deploy to cloud run
 on:
   push:
-    branches:
-      - master
-      - main
-      - develop
+    branches: [master, main, develop]
   pull_request:
-    branches:
-      - master
-      - main
-      - develop
+    branches: [master, main, develop]
   workflow_dispatch:
     inputs:
       environment:
@@ -18,60 +12,75 @@ on:
         default: 'dev'
         type: choice
         options: 
-          -dev
-          -stagging
-          -pod
+          - dev
+          - staging
+          - prod
+
 env:
-  GCP_REGION: europe-west1
+  GCP_REGION: europe-west1 
   ARTIFACT_REGISTRY: demo
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
       - name: Authenticate to google cloud
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
+
       - name: Set up gcloud CLI
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
+
       - name: Configure Docker for Google Artifact Registry
         run: |
-          gcloud auth configure-docker "${ GCP_REGION }-docker.pkg.dev" --quiet
+          gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
       - name: Set Image tag
         id: image-tag
         run: |
-          echo "tag=${env.GCP_REGION}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${env.ARTIFACT_REGISTRY }/demo:latest" >> $GITHUB_OUTPUT
-          echo "tag-sha=${env.GCP_REGION}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${env.ARTIFACT_REGISTRY }/demo:${{ github.sha }}" >> $GITHUB_OUTPUT
+          IMAGE_PATH="${GCP_REGION}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${ARTIFACT_REGISTRY}/demo"
+          echo "tag=${IMAGE_PATH}:latest" >> $GITHUB_OUTPUT
+          echo "tag-sha=${IMAGE_PATH}:${{ github.sha }}" >> $GITHUB_OUTPUT
+
       - name: Build Docker Image
         run: |
-          docker build --tag ${{ steps.image-tag.outputs.tag }} --tag ${{ steps.image-tag.outputs.tag-sha }} --file Dockerfile .
+          docker build \
+            --tag ${{ steps.image-tag.outputs.tag }} \
+            --tag ${{ steps.image-tag.outputs.tag-sha }} \
+            --file Dockerfile .
+
       - name: Push Docker Image
         run: |
           docker push ${{ steps.image-tag.outputs.tag }}
           docker push ${{ steps.image-tag.outputs.tag-sha }}
+
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy demo \
             --image ${{ steps.image-tag.outputs.tag }} \
-            --region ${env.GCP_REGION} \
+            --region ${GCP_REGION} \
             --platform managed \
             --allow-unauthenticated \
             --port 8080 \
             --cpu 1 \
             --memory 512Mi \
             --max-instances 5 \
-            --set-env-vars ENVIRONMENT=${{ github.event.inputs.environment }}
-            --timeout 300s
+            --set-env-vars ENVIRONMENT=${{ github.event.inputs.environment || 'dev' }} \
+            --timeout 300s \
             --quiet
+
       - name: Get URL
         id: get-url
         run: |
-          URL=$(gcloud run services describe demo --region ${env.GCP_REGION} --platform managed --format 'value(status.url)')
+          URL=$(gcloud run services describe demo --region ${GCP_REGION} --platform managed --format 'value(status.url)')
           echo "URL=$URL" >> $GITHUB_OUTPUT
+
       - name: Verify Deployment
         run: |
           curl -f ${{ steps.get-url.outputs.URL }} || exit 1
