@@ -1,67 +1,77 @@
-name: Deploy simple FastAPI to GCP VM
+name: Deploy to cloud run
 on:
   push:
     branches:
+      - master
       - main
+      - develop
+  pull_request:
+    branches:
+      - master
+      - main
+      - develop
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Development Environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options: 
+          -dev
+          -stagging
+          -pod
+env:
+  GCP_REGION: euroupe-west1
+  ARTIFACT_REGISTRY: demo
 jobs:
-  deploy: 
+  deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v1
+      - name: Authenticate to google cloud
+        uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
       - name: Set up gcloud CLI
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
-      - name: Deploy to GCP VM
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: 35.185.52.60
-          username: ${{ secrets.GCP_VM_USERNAME }}
-          key: ${{ secrets.GCP_VM_SSH_KEY }}
-          port: 22
-          command_timeout: 10m
-          script: |
-            set -e
-            APP_DIR="/home/${{ secrets.GCP_VM_USERNAME }}/fastapi_demo_app"
-            SERVICE_NAME="fastapi"
-            SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-            REPO_URL=https://github.com/Jenesha20/demo_ci_cd.git
-            mkdir -p $APP_DIR
-            cd $APP_DIR
-            if [ ! -d ".git"]; then
-              git init
-              git remote add origin "$REPO_URL"
-            else
-              git remote set-url origin "$REPO_URL"
-            fi
-            git fetch origin
-            git reset --hard origin/main
-            if [ ! -d "venv"]; then
-              python3 -m venv venv
-            fi
-            source venv/bin/activate
-            pip install --upgrade pip
-            pip install -r requirements.txt
-            sudo tee "$SERVICE_FILE" > /dev/null <<EOF
-            [Unit]
-            Description=FastAPI Demo Service
-            After=network.target
-            [Service]
-            User=${{ secrets.GCP_VM_USERNAME }}
-            WorkingDirectory=$APP_DIR
-            ExecStart=${APP_DIR}/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
-            Restart=always
-            RestartSec=5
-            Environment=PATH=${APP_DIR}/venv/bin
-            [Install]
-            WantedBy=multi-user.target
-            EOF
-            sudo systemctl daemon-reload
-            sudo systemctl enable $SERVICE_NAME
-            sudo systemctl restart $SERVICE_NAME
-            sudo systemctl status $SERVICE_NAME --no-pager           
+      - name: Configure Docker for Google Artifact Registry
+        run: |
+          gcloud auth configure-docker "${ GCP_REGION }-docker.pkg.dev" --quiet
+      - name: Set Image tag
+        id: image-tag
+        run: |
+          echo "tag=$GCP_REGION-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${ARTIFACT_REGISTRY }/demo:latest" >> $GITHUB_OUTPUT
+          echo "tag-sha=$GCP_REGION-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${ARTIFACT_REGISTRY }/demo:${{ github.sha }}" >> $GITHUB_OUTPUT
+      - name: Build Docker Image
+        run: |
+          docker build --tag ${{ steps.image-tag.outputs.tag }} --tag ${{ steps.image-tag.outputs.tag-sha }} --file Dockerfile .
+      - name: Push Docker Image
+        run: |
+          docker push ${{ steps.image-tag.outputs.tag }}
+          docker push ${{ steps.image-tag.outputs.tag-sha }}
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy demo \
+            --image ${{ steps.image-tag.outputs.tag }} \
+            --region ${GCP_REGION} \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8080 \
+            --cpu 1 \
+            --memory 512Mi \
+            --max-instances 5 \
+            --set-env-vars ENVIRONMENT=${{ github.event.inputs.environment }}
+            --timeout 300s
+            --quiet
+      - name: Get URL
+        id: get-url
+        run: |
+          URL=$(gcloud run services describe demo --region $GCP_REGION --platform managed --format 'value(status.url)')
+          echo "URL=$URL" >> $GITHUB_OUTPUT
+      - name: Verify Deployment
+        run: |
+          curl -f ${{ steps.get-url.outputs.URL }} || exit 1
